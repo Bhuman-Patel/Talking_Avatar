@@ -20,7 +20,7 @@ export function drawAvatar(targetMouth) {
   ctx.beginPath(); ctx.arc(160, 170, 10, 0, Math.PI * 2); ctx.fill();
   ctx.beginPath(); ctx.arc(260, 170, 10, 0, Math.PI * 2); ctx.fill();
 
-  // mouth (height driven by audio)
+  // mouth
   ctx.beginPath();
   ctx.ellipse(210, 275, 55, Math.max(6, mouth), 0, 0, Math.PI * 2);
   ctx.fillStyle = "#111";
