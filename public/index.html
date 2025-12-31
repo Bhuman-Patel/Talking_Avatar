@@ -1,37 +1,457 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-  <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Realtime Avatar Assistant</title>
-  <link rel="stylesheet" href="/styles.css" />
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Realtime Web Avatar (Single HTML)</title>
+  <style>
+    :root { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; }
+    body { margin: 0; background:#0b0f19; color:#e8eefc; }
+    .wrap { max-width: 980px; margin: 0 auto; padding: 20px; }
+    .row { display:flex; gap: 16px; flex-wrap: wrap; align-items: center; }
+    button { background:#2a5bff; color:white; border:0; padding:10px 14px; border-radius:10px; cursor:pointer; font-weight:600; }
+    button.secondary { background:#1d2536; border:1px solid #2b3752; }
+    button:disabled { opacity:.6; cursor:not-allowed; }
+    .card { background:#0f1627; border:1px solid #1b2a45; border-radius:16px; padding:14px; }
+    .grid { display:grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+    @media (max-width: 900px){ .grid{ grid-template-columns: 1fr; } }
+    .kv { display:grid; grid-template-columns: 180px 1fr; gap: 8px; font-size: 14px; }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; font-size: 12px; white-space: pre-wrap; word-break: break-word; }
+    .meter { height: 10px; border-radius: 999px; background:#111a2e; border:1px solid #223252; overflow:hidden; }
+    .meter > div { height:100%; width:0%; background:#2a5bff; transition: width .08s linear; }
+    canvas { width: 100%; height: auto; background:#0b1221; border:1px solid #1b2a45; border-radius:16px; }
+    .sub { padding:10px 12px; border-radius: 12px; background:#0b1221; border:1px solid #1b2a45; min-height: 44px; }
+    .sub b { color:#9fb6ff; }
+  </style>
 </head>
-
 <body>
-  <button id="connectBtn">Connect</button>
+  <div class="wrap">
+    <h2 style="margin:0 0 12px;">Realtime Web Avatar Assistant (Single File)</h2>
 
-  <div style="margin:10px 0;">
-	<div>Mic level: <span id="micLevel">0.00</span></div>
-	<div>Assistant audio: <span id="asstStatus">waiting</span></div>
+    <div class="row">
+      <button id="btnConnect">Connect</button>
+      <button id="btnDisconnect" class="secondary" disabled>Disconnect</button>
+      <button id="btnTest" class="secondary" disabled>Send test prompt (forces reply)</button>
+      <span id="hint" style="opacity:.85;font-size:14px;">
+        Tip: click Connect, allow mic, then speak. If no reply, click “Send test prompt”.
+      </span>
+    </div>
+
+    <div class="grid" style="margin-top:16px;">
+      <div class="card">
+        <h3 style="margin:0 0 10px;">Avatar</h3>
+        <canvas id="avatar" width="640" height="360"></canvas>
+        <audio id="assistantAudio" autoplay playsinline></audio>
+
+        <div style="margin-top:12px;">
+          <div class="sub"><b>You:</b> <span id="userSub">—</span></div>
+          <div class="sub" style="margin-top:10px;"><b>Assistant:</b> <span id="asstSub">—</span></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3 style="margin:0 0 10px;">Audio + WebRTC Status</h3>
+
+        <div class="kv">
+          <div>Mic level</div>
+          <div>
+            <div class="meter"><div id="micBar"></div></div>
+            <div class="mono" id="micText">—</div>
+          </div>
+
+          <div>Assistant audio</div>
+          <div>
+            <div class="meter"><div id="asstBar"></div></div>
+            <div class="mono" id="asstText">—</div>
+          </div>
+
+          <div>PC state</div><div class="mono" id="pcState">—</div>
+          <div>ICE state</div><div class="mono" id="iceState">—</div>
+          <div>DC state</div><div class="mono" id="dcState">—</div>
+        </div>
+
+        <h3 style="margin:14px 0 10px;">Event log</h3>
+        <div class="mono card" id="log" style="max-height: 320px; overflow:auto; background:#0b1221;">—</div>
+      </div>
+    </div>
   </div>
 
+  <script type="module">
+    // -------------------------
+    // Small UI helpers
+    // -------------------------
+    const $ = (id) => document.getElementById(id);
+    const logEl = $("log");
+    function log(...args) {
+      const line = args.map(a => typeof a === "string" ? a : JSON.stringify(a)).join(" ");
+      logEl.textContent = (logEl.textContent === "—" ? "" : logEl.textContent + "\\n") + line;
+      logEl.scrollTop = logEl.scrollHeight;
+      console.log(...args);
+    }
 
-  <div class="stage">
-    <canvas id="avatar" width="420" height="420"></canvas>
+    // -------------------------
+    // Avatar drawing (simple 2D)
+    // -------------------------
+    const canvas = $("avatar");
+    const ctx = canvas.getContext("2d");
+    let mouthOpen = 0; // 0..1
 
+    function drawAvatar() {
+      const w = canvas.width, h = canvas.height;
+      ctx.clearRect(0,0,w,h);
 
-    <div id="log" class="log"></div>
-  </div>
+      // head
+      ctx.fillStyle = "#132043";
+      ctx.beginPath();
+      ctx.arc(w*0.5, h*0.46, Math.min(w,h)*0.28, 0, Math.PI*2);
+      ctx.fill();
 
-  <audio id="assistantAudio" autoplay></audio>
+      // eyes
+      ctx.fillStyle = "#e8eefc";
+      ctx.beginPath();
+      ctx.arc(w*0.43, h*0.40, 10, 0, Math.PI*2);
+      ctx.arc(w*0.57, h*0.40, 10, 0, Math.PI*2);
+      ctx.fill();
 
-  <footer>
-    <p>
-      Built with 🧡 using WebRTC + OpenAI Realtime API
-    </p>
-  </footer>
+      // pupils
+      ctx.fillStyle = "#0b0f19";
+      ctx.beginPath();
+      ctx.arc(w*0.43, h*0.40, 4, 0, Math.PI*2);
+      ctx.arc(w*0.57, h*0.40, 4, 0, Math.PI*2);
+      ctx.fill();
 
-  <!-- SINGLE entry point -->
-  <script type="module" src="/app.js"></script>
+      // mouth (height driven by mouthOpen)
+      const mw = 120;
+      const mh = 10 + mouthOpen * 55;
+      const mx = w*0.5 - mw/2;
+      const my = h*0.58;
+
+      ctx.fillStyle = "#0b0f19";
+      roundRect(ctx, mx, my, mw, mh, 14);
+      ctx.fill();
+
+      // lip highlight
+      ctx.strokeStyle = "#2b3752";
+      ctx.lineWidth = 2;
+      roundRect(ctx, mx, my, mw, mh, 14);
+      ctx.stroke();
+    }
+
+    function roundRect(c, x, y, width, height, radius) {
+      const r = Math.min(radius, height/2, width/2);
+      c.beginPath();
+      c.moveTo(x+r, y);
+      c.arcTo(x+width, y, x+width, y+height, r);
+      c.arcTo(x+width, y+height, x, y+height, r);
+      c.arcTo(x, y+height, x, y, r);
+      c.arcTo(x, y, x+width, y, r);
+      c.closePath();
+    }
+
+    // -------------------------
+    // WebAudio analyzers
+    // -------------------------
+    const assistantAudio = $("assistantAudio");
+    let assistantAudioCtx, assistantAnalyser, assistantData;
+
+    function ensureAssistantAnalyser() {
+      if (assistantAudioCtx) return;
+      assistantAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const src = assistantAudioCtx.createMediaElementSource(assistantAudio);
+      assistantAnalyser = assistantAudioCtx.createAnalyser();
+      assistantAnalyser.fftSize = 2048;
+      src.connect(assistantAnalyser);
+      assistantAnalyser.connect(assistantAudioCtx.destination);
+      assistantData = new Uint8Array(assistantAnalyser.fftSize);
+      log("[audio] Assistant analyser ready");
+    }
+
+    function rmsFromAnalyser(analyser, dataArr) {
+      analyser.getByteTimeDomainData(dataArr);
+      let sum = 0;
+      for (let i=0;i<dataArr.length;i++){
+        const v = (dataArr[i] - 128) / 128;
+        sum += v*v;
+      }
+      return Math.sqrt(sum / dataArr.length);
+    }
+
+    function animate() {
+      // assistant RMS → mouthOpen
+      let aRms = 0;
+      if (assistantAnalyser && assistantData) {
+        aRms = rmsFromAnalyser(assistantAnalyser, assistantData);
+      }
+
+      // smooth
+      const target = Math.min(1, aRms * 10);
+      mouthOpen = mouthOpen + (target - mouthOpen) * 0.25;
+      drawAvatar();
+
+      // update assistant meter
+      const asstPct = Math.max(0, Math.min(100, target * 100));
+      $("asstBar").style.width = asstPct.toFixed(0) + "%";
+      $("asstText").textContent = `rms=${aRms.toFixed(4)}  mouthOpen=${mouthOpen.toFixed(2)}  audio.paused=${assistantAudio.paused}`;
+
+      requestAnimationFrame(animate);
+    }
+    requestAnimationFrame(animate);
+
+    // -------------------------
+    // Mic meter (independent from assistant)
+    // -------------------------
+    let micMeterCtx, micAnalyser, micData;
+    async function startMicMeter(stream) {
+      micMeterCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const src = micMeterCtx.createMediaStreamSource(stream);
+      micAnalyser = micMeterCtx.createAnalyser();
+      micAnalyser.fftSize = 2048;
+      src.connect(micAnalyser);
+      micData = new Uint8Array(micAnalyser.fftSize);
+
+      const tick = () => {
+        if (!micAnalyser) return;
+        const r = rmsFromAnalyser(micAnalyser, micData);
+        const pct = Math.max(0, Math.min(100, r * 120)); // scale
+        $("micBar").style.width = pct.toFixed(0) + "%";
+        $("micText").textContent = `rms=${r.toFixed(4)}`;
+        requestAnimationFrame(tick);
+      };
+      requestAnimationFrame(tick);
+      log("[audio] Mic meter ready");
+    }
+
+    // -------------------------
+    // WebRTC + Realtime API
+    // -------------------------
+    let pc = null;
+    let dc = null;
+    let localStream = null;
+
+    function updateStates() {
+      $("pcState").textContent = pc ? pc.connectionState : "—";
+      $("iceState").textContent = pc ? pc.iceConnectionState : "—";
+      $("dcState").textContent = dc ? dc.readyState : "—";
+    }
+
+    async function connect() {
+      $("btnConnect").disabled = true;
+
+      // IMPORTANT: autoplay / audio contexts require user gesture.
+      // We are inside a click handler, so resume contexts + allow play.
+      try {
+        ensureAssistantAnalyser();
+        if (assistantAudioCtx?.state === "suspended") await assistantAudioCtx.resume();
+      } catch {}
+
+      pc = new RTCPeerConnection();
+      pc.onconnectionstatechange = updateStates;
+      pc.oniceconnectionstatechange = updateStates;
+
+      pc.ontrack = (e) => {
+        log("[webrtc] ontrack kind=", e.track.kind);
+        if (e.track.kind === "audio") {
+          assistantAudio.srcObject = e.streams[0];
+          // Try to play (may still be blocked if not user gesture; but we are in Connect click)
+          assistantAudio.play().then(() => {
+            log("[audio] assistantAudio.play() OK");
+          }).catch(err => {
+            log("[audio] assistantAudio.play() failed:", String(err));
+          });
+        }
+      };
+
+      // 1) Mic capture
+      try {
+        localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      } catch (err) {
+        log("[error] mic permission failed:", String(err));
+        $("btnConnect").disabled = false;
+        return;
+      }
+
+      localStream.getTracks().forEach(t => pc.addTrack(t, localStream));
+      await startMicMeter(localStream);
+
+      // 2) Data channel for events
+      dc = pc.createDataChannel("oai-events");
+      dc.onopen = () => { log("[dc] open"); updateStates(); $("btnTest").disabled = false; };
+      dc.onclose = () => { log("[dc] close"); updateStates(); $("btnTest").disabled = true; };
+      dc.onerror = (e) => { log("[dc] error", e); };
+
+      dc.onmessage = (event) => {
+        // Realtime events come as JSON
+        try {
+          const msg = JSON.parse(event.data);
+          // Log only important/high-signal events (you can expand this later)
+          if (msg.type) log("[evt]", msg.type);
+
+          // Try to surface transcripts if present
+          // (Exact field names can vary by event type; we handle a few common shapes.)
+          if (msg.type?.includes("transcript") || msg.type?.includes("text")) {
+            log("[evt:data]", msg);
+          }
+
+          // Common patterns we handle:
+          // - user transcript
+          if (msg.type?.includes("input_audio_transcription") && msg.transcript) {
+            $("userSub").textContent = msg.transcript;
+          }
+          if (msg.type?.includes("conversation.item.input_audio_transcription.completed") && msg.transcript) {
+            $("userSub").textContent = msg.transcript;
+          }
+
+          // - assistant transcript
+          if (msg.type?.includes("response") && typeof msg.text === "string") {
+            $("asstSub").textContent = msg.text;
+          }
+          if (msg.delta && typeof msg.delta === "string") {
+            // streamy text deltas (if your model sends them)
+            const cur = $("asstSub").textContent;
+            $("asstSub").textContent = (cur === "—" ? "" : cur) + msg.delta;
+          }
+        } catch {
+          // Non-JSON messages
+          log("[dc] message:", event.data);
+        }
+      };
+
+      updateStates();
+
+      // 3) Fetch ephemeral key from your server (/session)
+      let session;
+      try {
+        const r = await fetch("/session");
+        session = await r.json();
+      } catch (err) {
+        log("[error] /session failed:", String(err));
+        $("btnConnect").disabled = false;
+        return;
+      }
+
+      const EPHEMERAL_KEY = session?.client_secret?.value;
+      const MODEL = session?.model || "gpt-realtime"; // fallback
+      if (!EPHEMERAL_KEY) {
+        log("[error] Missing session.client_secret.value from /session response. Fix your server.");
+        $("btnConnect").disabled = false;
+        return;
+      }
+
+      log("[session] model=", MODEL);
+
+      // 4) SDP offer/answer
+      const offer = await pc.createOffer();
+      await pc.setLocalDescription(offer);
+
+      let answerSdp = null;
+      try {
+        const sdpResponse = await fetch(`https://api.openai.com/v1/realtime?model=${encodeURIComponent(MODEL)}`, {
+          method: "POST",
+          body: offer.sdp,
+          headers: {
+            Authorization: `Bearer ${EPHEMERAL_KEY}`,
+            "Content-Type": "application/sdp",
+          },
+        });
+        answerSdp = await sdpResponse.text();
+        if (!sdpResponse.ok) {
+          log("[error] Realtime SDP request failed:", sdpResponse.status, answerSdp);
+          $("btnConnect").disabled = false;
+          return;
+        }
+      } catch (err) {
+        log("[error] Realtime SDP request exception:", String(err));
+        $("btnConnect").disabled = false;
+        return;
+      }
+
+      await pc.setRemoteDescription({ type: "answer", sdp: answerSdp });
+      log("[webrtc] connected (remote description set)");
+      updateStates();
+
+      $("btnDisconnect").disabled = false;
+
+      // 5) Send a session.update so the model knows we want audio responses
+      // (This often fixes "connected but no response".)
+      sendEvent({
+        type: "session.update",
+        session: {
+          modalities: ["audio", "text"],
+          // choose a voice if supported by your model
+          voice: "alloy",
+          // keep turn detection on for open-ear behavior
+          turn_detection: { type: "server_vad" },
+          instructions: "You are a helpful, concise voice assistant. Respond verbally."
+        }
+      });
+
+      log("[hint] Speak now. If nothing happens, click 'Send test prompt'.");
+    }
+
+    function sendEvent(obj) {
+      if (!dc || dc.readyState !== "open") return;
+      dc.send(JSON.stringify(obj));
+    }
+
+    function disconnect() {
+      try { dc?.close(); } catch {}
+      try {
+        pc?.getSenders()?.forEach(s => { try { s.track?.stop(); } catch {} });
+        pc?.close();
+      } catch {}
+
+      pc = null; dc = null;
+
+      try { localStream?.getTracks()?.forEach(t => t.stop()); } catch {}
+      localStream = null;
+
+      $("btnConnect").disabled = false;
+      $("btnDisconnect").disabled = true;
+      $("btnTest").disabled = true;
+
+      $("userSub").textContent = "—";
+      $("asstSub").textContent = "—";
+      log("[webrtc] disconnected");
+      updateStates();
+    }
+
+    // Forces a response even if turn detection isn't triggering
+    function sendTestPrompt() {
+      // Create a text input then request a response
+      sendEvent({
+        type: "conversation.item.create",
+        item: {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text: "Say a short hello and confirm you can speak audio." }]
+        }
+      });
+
+      sendEvent({
+        type: "response.create",
+        response: {
+          modalities: ["audio", "text"],
+          instructions: "Reply with one sentence."
+        }
+      });
+
+      log("[test] sent response.create");
+    }
+
+    // -------------------------
+    // Wire UI buttons
+    // -------------------------
+    $("btnConnect").addEventListener("click", connect);
+    $("btnDisconnect").addEventListener("click", disconnect);
+    $("btnTest").addEventListener("click", sendTestPrompt);
+
+    // Make sure analyser is created so the avatar can move when audio starts
+    assistantAudio.addEventListener("play", () => {
+      try {
+        ensureAssistantAnalyser();
+        assistantAudioCtx?.resume?.();
+      } catch {}
+    });
+  </script>
 </body>
 </html>
