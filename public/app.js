@@ -1,7 +1,10 @@
 // public/app.js
+import { bindAssistantStreamForLipSync } from "./lipsync.js";
+
 const connectBtn = document.getElementById("connectBtn");
 const disconnectBtn = document.getElementById("disconnectBtn");
 const testBtn = document.getElementById("testBtn");
+const speakerBtn = document.getElementById("speakerBtn");
 
 const micLevelEl = document.getElementById("micLevel");
 const asstStatusEl = document.getElementById("asstStatus");
@@ -13,12 +16,11 @@ const dcStateEl = document.getElementById("dcState");
 
 const micBar = document.getElementById("micBar");
 const assistantAudio = document.getElementById("assistantAudio");
+
 const userSub = document.getElementById("userSub");
 const asstSub = document.getElementById("asstSub");
 
-let peerConnection;
-let dataChannel;
-let localStream;
+let pc, dc, localStream;
 
 function log(...args) {
   const line = args.map(a => (typeof a === "string" ? a : JSON.stringify(a))).join(" ");
@@ -28,9 +30,9 @@ function log(...args) {
 }
 
 function updateStates() {
-  pcStateEl.textContent = peerConnection?.connectionState ?? "—";
-  iceStateEl.textContent = peerConnection?.iceConnectionState ?? "—";
-  dcStateEl.textContent = dataChannel?.readyState ?? "—";
+  pcStateEl.textContent = pc?.connectionState ?? "—";
+  iceStateEl.textContent = pc?.iceConnectionState ?? "—";
+  dcStateEl.textContent = dc?.readyState ?? "—";
 }
 
 function startMicMeter(stream) {
@@ -63,59 +65,117 @@ function startMicMeter(stream) {
 }
 
 function sendEvent(obj) {
-  if (!dataChannel || dataChannel.readyState !== "open") return;
-  dataChannel.send(JSON.stringify(obj));
+  if (!dc || dc.readyState !== "open") return;
+  dc.send(JSON.stringify(obj));
+}
+
+// Always request an AUDIO response (this prevents “response with output_len=0” in many setups)
+function requestAudioResponse(reason = "auto") {
+  sendEvent({
+    type: "response.create",
+    response: {
+      modalities: ["audio", "text"],
+      voice: "alloy",
+      instructions: reason === "test"
+        ? "Say one short sentence out loud."
+        : "Reply out loud in 1 short sentence."
+    }
+  });
+  log(`[response.create] requested (${reason})`);
+}
+
+function playBeep() {
+  const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  const osc = ctx.createOscillator();
+  const gain = ctx.createGain();
+
+  osc.type = "sine";
+  osc.frequency.value = 880;
+  gain.gain.value = 0.2;
+
+  osc.connect(gain);
+  gain.connect(ctx.destination);
+
+  ctx.resume().then(() => {
+    osc.start();
+    setTimeout(() => {
+      osc.stop();
+      ctx.close();
+    }, 400);
+  });
 }
 
 function wireDataChannel() {
-  dataChannel.addEventListener("open", () => {
+  dc.addEventListener("open", () => {
     log("[dc] open");
     updateStates();
     testBtn.disabled = false;
 
-    // Tell the session we want audio + text, and enable server VAD
+    // Configure session (audio+text + voice) + make VAD less aggressive
     sendEvent({
       type: "session.update",
       session: {
-        modalities: ["text", "audio"],
-        turn_detection: { type: "server_vad" },
-        instructions: "You are a helpful voice assistant. Keep replies concise and natural."
+        voice: "alloy",
+        modalities: ["audio", "text"],
+        turn_detection: { type: "server_vad", silence_duration_ms: 1400 },
+        instructions: "You are a helpful voice assistant. Always speak your replies."
       }
     });
 
-    // Don’t auto-trigger response.create here (it can produce silence if there’s no user input yet).
-    // We'll use the test button to force a reply during debugging.
+    // Auto test prompt (keeps your UI exactly the same)
+    sendEvent({
+      type: "conversation.item.create",
+      item: {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "Say: audio is working." }]
+      }
+    });
+    requestAudioResponse("auto-test");
   });
 
-  dataChannel.addEventListener("message", (ev) => {
-    try {
-      const msg = JSON.parse(ev.data);
-      if (msg?.type) log("[evt]", msg.type);
+  dc.addEventListener("message", (ev) => {
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch { return; }
 
-      // Basic transcript surfacing (we’ll refine later)
-      if (msg.transcript && msg.type?.includes("transcription")) {
-        userSub.textContent = msg.transcript;
-      }
-      if (typeof msg.text === "string") {
-        asstSub.textContent = msg.text;
-      }
-      if (typeof msg.delta === "string") {
-        const cur = asstSub.textContent === "—" ? "" : asstSub.textContent;
-        asstSub.textContent = cur + msg.delta;
-      }
-    } catch {
-      // Non-JSON events
-      // log("[dc] message:", ev.data);
+    if (msg?.type) log("[evt]", msg.type);
+
+    // Log errors explicitly
+    if (msg.type === "error" || msg.error) {
+      log("[ERROR]", msg);
+    }
+
+    // When the user's speech gets committed, request a response WITH audio
+    if (msg.type === "input_audio_buffer.committed") {
+      requestAudioResponse("committed");
+    }
+
+    // Log response output length so we can verify generation is happening
+    if (msg.type === "response.created" || msg.type === "response.done") {
+      const out = msg.response?.output;
+      log("[RESP]", msg.type, "output_len=", Array.isArray(out) ? out.length : "n/a");
+    }
+
+    // Captions (keep your current behavior; we’ll enhance later)
+    if (msg.transcript && msg.type?.includes("transcription")) {
+      userSub.textContent = msg.transcript;
+    }
+    if (typeof msg.text === "string") {
+      asstSub.textContent = msg.text;
+    }
+    if (typeof msg.delta === "string") {
+      const cur = asstSub.textContent === "—" ? "" : asstSub.textContent;
+      asstSub.textContent = cur + msg.delta;
     }
   });
 
-  dataChannel.addEventListener("close", () => {
+  dc.addEventListener("close", () => {
     log("[dc] close");
-    updateStates();
     testBtn.disabled = true;
+    updateStates();
   });
 
-  dataChannel.addEventListener("error", (e) => {
+  dc.addEventListener("error", (e) => {
     log("[dc] error", String(e));
     updateStates();
   });
@@ -125,65 +185,71 @@ async function start() {
   connectBtn.disabled = true;
   connectBtn.textContent = "Connecting...";
 
-  // Create PC
-  peerConnection = new RTCPeerConnection();
-  peerConnection.onconnectionstatechange = updateStates;
-  peerConnection.oniceconnectionstatechange = updateStates;
+  pc = new RTCPeerConnection();
+  pc.onconnectionstatechange = updateStates;
+  pc.oniceconnectionstatechange = updateStates;
 
-  // Remote audio
-  peerConnection.ontrack = (event) => {
+  pc.ontrack = async (event) => {
     log("[webrtc] ontrack kind=", event.track.kind);
     if (event.track.kind !== "audio") return;
 
     const [remoteStream] = event.streams;
+
+    const remoteTrack = remoteStream.getAudioTracks()[0];
+    log("[audio-track] enabled=", remoteTrack.enabled, "muted=", remoteTrack.muted, "readyState=", remoteTrack.readyState);
+    remoteTrack.onunmute = () => log("[audio-track] onunmute ✅ (frames arriving)");
+
     assistantAudio.srcObject = remoteStream;
+    assistantAudio.muted = false;
+    assistantAudio.volume = 1.0;
 
     asstStatusEl.textContent = "receiving track ✅";
     assistantAudio.onplaying = () => (asstStatusEl.textContent = "playing ✅");
     assistantAudio.onpause = () => (asstStatusEl.textContent = "paused");
 
-    assistantAudio.play().then(() => {
+    try {
+      await assistantAudio.play();
       log("[audio] assistantAudio.play() OK");
-    }).catch((e) => {
+    } catch (e) {
       log("[audio] play blocked:", String(e));
       asstStatusEl.textContent = "autoplay blocked (click again)";
-    });
+    }
+
+    // lipsync driven by remote stream analysis
+    await bindAssistantStreamForLipSync(remoteStream);
   };
 
-  // Data channel
-  dataChannel = peerConnection.createDataChannel("oai-events");
+  dc = pc.createDataChannel("oai-events");
   wireDataChannel();
   updateStates();
 
-  // Mic capture
   localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
   log("[mic] tracks:", localStream.getAudioTracks().map(t => t.label || "(unnamed)").join(", "));
   startMicMeter(localStream);
 
-  // Send mic to peer
   localStream.getTracks().forEach((track) => {
-    peerConnection.addTransceiver(track, { direction: "sendrecv" });
+    pc.addTransceiver(track, { direction: "sendrecv" });
   });
 
-  // Offer
-  const offer = await peerConnection.createOffer();
-  await peerConnection.setLocalDescription(offer);
+  const offer = await pc.createOffer();
+  await pc.setLocalDescription(offer);
 
-  // Get ephemeral key from server
+  // Ephemeral session token from your worker
   const tokenResponse = await fetch("/session");
   const session = await tokenResponse.json();
 
-  // NOTE: your current code expects: data.result.client_secret.value
+  // helpful: log shape
+  log("[session] keys=", Object.keys(session || {}));
+
   const EPHEMERAL_KEY = session?.result?.client_secret?.value;
-  if (!EPHEMERAL_KEY) {
-    throw new Error("Missing session.result.client_secret.value from /session");
-  }
+  const modelFromServer = session?.result?.model;
 
-  const baseUrl = "https://api.openai.com/v1/realtime";
-  const model = "gpt-4o-realtime-preview-2024-12-17";
+  if (!EPHEMERAL_KEY) throw new Error("Missing session.result.client_secret.value from /session");
 
-  // Exchange SDP
-  const answerResp = await fetch(`${baseUrl}?model=${encodeURIComponent(model)}`, {
+  const model = modelFromServer || "gpt-4o-realtime-preview-2024-12-17";
+  log("[session-model]", model);
+
+  const answerResp = await fetch(`https://api.openai.com/v1/realtime?model=${encodeURIComponent(model)}`, {
     method: "POST",
     body: offer.sdp,
     headers: {
@@ -193,30 +259,26 @@ async function start() {
   });
 
   const answerSdp = await answerResp.text();
-  if (!answerResp.ok) {
-    throw new Error(`Realtime SDP failed (${answerResp.status}): ${answerSdp}`);
-  }
+  if (!answerResp.ok) throw new Error(`Realtime SDP failed (${answerResp.status}): ${answerSdp}`);
 
-  await peerConnection.setRemoteDescription({ type: "answer", sdp: answerSdp });
+  await pc.setRemoteDescription({ type: "answer", sdp: answerSdp });
+  log("[webrtc] remote description set ✅");
 
   connectBtn.textContent = "Connected";
   disconnectBtn.disabled = false;
-  log("[webrtc] remote description set ✅");
+  testBtn.disabled = false;
   updateStates();
 }
 
 function disconnect() {
-  try { dataChannel?.close(); } catch {}
+  try { dc?.close(); } catch {}
   try {
-    peerConnection?.getSenders()?.forEach(s => { try { s.track?.stop(); } catch {} });
-    peerConnection?.close();
+    pc?.getSenders()?.forEach(s => { try { s.track?.stop(); } catch {} });
+    pc?.close();
   } catch {}
-
   try { localStream?.getTracks()?.forEach(t => t.stop()); } catch {}
 
-  peerConnection = null;
-  dataChannel = null;
-  localStream = null;
+  pc = null; dc = null; localStream = null;
 
   connectBtn.disabled = false;
   connectBtn.textContent = "Connect";
@@ -230,37 +292,31 @@ function disconnect() {
   updateStates();
 }
 
-// Forces the model to respond (audio + text) even if VAD/turn detection didn’t trigger.
 function sendTestPrompt() {
-  if (!dataChannel || dataChannel.readyState !== "open") return;
-
+  if (!dc || dc.readyState !== "open") return;
   asstSub.textContent = "";
+
   sendEvent({
     type: "conversation.item.create",
     item: {
       type: "message",
       role: "user",
-      content: [{ type: "input_text", text: "Say a short hello and confirm you can speak audio." }]
-    }
+      content: [{ type: "input_text", text: "Say a short hello and confirm you can speak audio." }],
+    },
   });
 
-  sendEvent({
-    type: "response.create",
-    response: { modalities: ["audio", "text"] }
-  });
-
-  log("[test] sent conversation.item.create + response.create");
+  requestAudioResponse("test");
 }
 
-connectBtn.addEventListener("click", () => {
-  start().catch((err) => {
-    console.error(err);
-    log("[error]", String(err));
-    connectBtn.disabled = false;
-    connectBtn.textContent = "Connect";
-    alert("Failed to connect. Check the log/console.");
-  });
-});
+connectBtn.addEventListener("click", () => start().catch((err) => {
+  console.error(err);
+  log("[error]", String(err));
+  connectBtn.disabled = false;
+  connectBtn.textContent = "Connect";
+  alert("Failed to connect. Check the log/console.");
+}));
 
 disconnectBtn.addEventListener("click", disconnect);
 testBtn.addEventListener("click", sendTestPrompt);
+
+if (speakerBtn) speakerBtn.addEventListener("click", playBeep);

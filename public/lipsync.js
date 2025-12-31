@@ -1,30 +1,27 @@
 // public/lipsync.js
 import { drawAvatar } from "./avatar.js";
 
-const audioEl = document.getElementById("assistantAudio");
 const asstBar = document.getElementById("asstBar");
 
 let audioCtx, analyser, data;
 
-function ensureAnalyser() {
-  if (audioCtx) return;
-
-  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-  const src = audioCtx.createMediaElementSource(audioEl);
+export async function bindAssistantStreamForLipSync(remoteStream) {
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
 
   analyser = audioCtx.createAnalyser();
   analyser.fftSize = 2048;
-
-  src.connect(analyser);
-  analyser.connect(audioCtx.destination);
-
   data = new Uint8Array(analyser.fftSize);
+
+  const src = audioCtx.createMediaStreamSource(remoteStream);
+  src.connect(analyser);
+
+  // Analysis only; playback is still via <audio>
+  if (audioCtx.state !== "running") await audioCtx.resume();
 }
 
 function rms() {
-  if (!analyser) return 0;
+  if (!analyser || !data) return 0;
   analyser.getByteTimeDomainData(data);
-
   let sum = 0;
   for (let i = 0; i < data.length; i++) {
     const v = (data[i] - 128) / 128;
@@ -34,20 +31,18 @@ function rms() {
 }
 
 function loop() {
-  const v = rms();                 // ~0..0.3 typical
+  const v = rms();
+
+  // avatar mouth
   const mouthOpen = Math.min(42, v * 170);
   drawAvatar(mouthOpen);
 
-  // assistant meter (0..100)
-  const pct = Math.max(0, Math.min(100, (v * 10) * 100));
-  if (asstBar) asstBar.style.width = `${pct.toFixed(0)}%`;
+  // assistant meter
+  if (asstBar) {
+    const pct = Math.max(0, Math.min(100, v * 1200)); // aggressive scaling
+    asstBar.style.width = `${pct.toFixed(0)}%`;
+  }
 
   requestAnimationFrame(loop);
 }
-
-audioEl.addEventListener("play", async () => {
-  ensureAnalyser();
-  if (audioCtx.state !== "running") await audioCtx.resume();
-});
-
 loop();
