@@ -9,27 +9,58 @@ type Env = {
 const app = new Hono<{ Bindings: Env }>();
 app.use("*", cors());
 
-app.get("/session", async (c) => {
+// Browser POSTs SDP offer here
+app.post("/session", async (c) => {
   const apiKey = c.env.OPENAI_API_KEY;
-  if (!apiKey) return c.json({ error: "Missing OPENAI_API_KEY" }, 500);
+  if (!apiKey) {
+    return new Response("Missing OPENAI_API_KEY", { status: 500 });
+  }
 
-  const resp = await fetch("https://api.openai.com/v1/realtime/sessions", {
+  const sdpOffer = await c.req.text();
+
+  // IMPORTANT:
+  // Do NOT include turn_detection here — this endpoint rejects session.turn_detection.
+  // Configure turn detection from the browser via `session.update` instead.
+  const sessionConfig = JSON.stringify({
+    type: "realtime",
+    model: "gpt-realtime",
+    instructions: "You are a helpful voice assistant. Always speak your replies.",
+    audio: {
+      output: { voice: "alloy" }
+    }
+  });
+
+  const fd = new FormData();
+  fd.set("sdp", sdpOffer);
+  fd.set("session", sessionConfig);
+
+  const r = await fetch("https://api.openai.com/v1/realtime/calls", {
     method: "POST",
     headers: {
       Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
     },
-    body: JSON.stringify({
-      model: "gpt-4o-realtime-preview-2024-12-17",
-      voice: "alloy",
-      modalities: ["audio", "text"],
-      instructions: "You are a helpful voice assistant. Always reply with spoken audio.",
-      turn_detection: { type: "server_vad", silence_duration_ms: 1400 },
-    }),
+    body: fd,
   });
 
-  const json = await resp.json();
-  return c.json({ result: json }, resp.ok ? 200 : 500);
+  const bodyText = await r.text();
+
+  if (!r.ok) {
+    return new Response(bodyText, {
+      status: r.status,
+      headers: {
+        "Content-Type": "text/plain",
+        "Access-Control-Allow-Origin": "*",
+      },
+    });
+  }
+
+  return new Response(bodyText, {
+    status: 200,
+    headers: {
+      "Content-Type": "application/sdp",
+      "Access-Control-Allow-Origin": "*",
+    },
+  });
 });
 
 export default app;

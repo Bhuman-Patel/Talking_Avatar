@@ -1,48 +1,18 @@
-// public/lipsync.js
-import { drawAvatar } from "./avatar.js";
+const canvas = document.getElementById("avatar");
+const ctx = canvas.getContext("2d");
 
-const asstBar = document.getElementById("asstBar");
+export function drawAvatar(level = 0) {
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-let audioCtx, analyser, data;
+  ctx.fillStyle = "#1e293b";
+  ctx.beginPath();
+  ctx.arc(210, 210, 180, 0, Math.PI * 2);
+  ctx.fill();
 
-export async function bindAssistantStreamForLipSync(remoteStream) {
-  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-
-  analyser = audioCtx.createAnalyser();
-  analyser.fftSize = 2048;
-  data = new Uint8Array(analyser.fftSize);
-
-  const src = audioCtx.createMediaStreamSource(remoteStream);
-  src.connect(analyser);
-
-  // Analysis only; playback is still via <audio>
-  if (audioCtx.state !== "running") await audioCtx.resume();
+  ctx.fillStyle = "#f87171";
+  ctx.beginPath();
+  ctx.ellipse(210, 280, 40, 8 + level * 30, 0, 0, Math.PI * 2);
+  ctx.fill();
 }
 
-function rms() {
-  if (!analyser || !data) return 0;
-  analyser.getByteTimeDomainData(data);
-  let sum = 0;
-  for (let i = 0; i < data.length; i++) {
-    const v = (data[i] - 128) / 128;
-    sum += v * v;
-  }
-  return Math.sqrt(sum / data.length);
-}
-
-function loop() {
-  const v = rms();
-
-  // avatar mouth
-  const mouthOpen = Math.min(42, v * 170);
-  drawAvatar(mouthOpen);
-
-  // assistant meter
-  if (asstBar) {
-    const pct = Math.max(0, Math.min(100, v * 1200)); // aggressive scaling
-    asstBar.style.width = `${pct.toFixed(0)}%`;
-  }
-
-  requestAnimationFrame(loop);
-}
-loop();
+drawAvatar(0);
